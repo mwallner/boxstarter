@@ -1,33 +1,84 @@
-
-function Expand-ZipFile($ZipFilePath, $DestinationFolder) {
-    if ($PSVersionTable.PSVersion.Major -ge 4) {
+# dupe - see Install-BoxstarterPackage
+function Expand-ZipFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ZipFilePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationFolder
+    )
+        
+    # Ensure destination exists
+    if (!(Test-Path $DestinationFolder)) {
+        New-Item -ItemType Directory -Path $DestinationFolder -Force | Out-Null
+    }
+        
+    # PowerShell 5+ on Windows: Use System.IO.Compression.ZipFile
+    if ($PSVersionTable.PSVersion.Major -ge 5 -and $IsWindows) {
         try {
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipFilePath)
-
-            foreach ($entry in $archive.Entries) {
-                $entryTargetFilePath = [System.IO.Path]::Combine($DestinationFolder, $entry.FullName)
-                $entryDir = [System.IO.Path]::GetDirectoryName($entryTargetFilePath)
-
-                if (!(Test-Path $entryDir)) {
-                    New-Item -ItemType Directory -Path $entryDir -Force | Out-Null
-                }
-
-                if (!$entryTargetFilePath.EndsWith("/")) {
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $entryTargetFilePath, $true);
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipFilePath, $DestinationFolder)
+            return
+        }
+        catch {}
+    }
+        
+    # PowerShell Core (6+) on any OS: Use System.IO.Compression.ZipFile from .NET Core
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        }
+        catch {
+            # On Linux/macOS, FileSystem may not be available, but ZipFile usually is
+            try {
+                Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+            }
+            catch {}
+        }
+        try {
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipFilePath, $DestinationFolder)
+            return
+        }
+        catch {}
+    }
+        
+    # PowerShell 2-4 on Windows: Use Shell.Application COM object
+    if ($IsWindows) {
+        try {
+            $shell = New-Object -ComObject Shell.Application
+            $zip = $shell.NameSpace($ZipFilePath)
+            $dest = $shell.NameSpace($DestinationFolder)
+            if ($zip -and $dest) {
+                $dest.CopyHere($zip.Items(), 0x10)
+                return
+            }
+        }
+        catch {}
+    }
+        
+    # Fallback: Use .NET DeflateStream/ZipArchive (works on all platforms, but slower)
+    try {
+        Add-Type -TypeDefinition @'
+        using System;
+        using System.IO;
+        using System.IO.Compression;
+        public class ZipExtract {
+            public static void Extract(string zipPath, string extractPath) {
+                using (var archive = ZipFile.OpenRead(zipPath)) {
+                    foreach (var entry in archive.Entries) {
+                        string filePath = Path.Combine(extractPath, entry.FullName);
+                        string dir = Path.GetDirectoryName(filePath);
+                        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                        if (!String.IsNullOrEmpty(entry.Name)) entry.ExtractToFile(filePath, true);
+                    }
                 }
             }
         }
-        catch {
-            throw $_
-        }
+'@ -ReferencedAssemblies 'System.IO.Compression.FileSystem.dll', 'System.IO.Compression.dll' -ErrorAction Stop
+        [ZipExtract]::Extract($ZipFilePath, $DestinationFolder)
+        return
     }
-    else {
-        #original method
-        $shellApplication = new-object -com shell.application
-        $zipPackage = $shellApplication.NameSpace($ZipFilePath)
-        $DestinationF = $shellApplication.NameSpace($DestinationFolder)
-        $DestinationF.CopyHere($zipPackage.Items(), 0x10)
+    catch {
+        throw 'Could not extract zip file. No supported extraction method found for this platform/PowerShell version.'
     }
 }
 
